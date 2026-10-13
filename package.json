@@ -1,0 +1,52 @@
+{
+  "name": "bb-plugin-statusbar-host",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "A Statusbar section provider for the Statusbar plugin: this machine's CPU, memory, disk, load, and network, read from host-monitor's samples.",
+  "keywords": [
+    "bb",
+    "bb-plugin",
+    "statusbar",
+    "host",
+    "monitor",
+    "cpu",
+    "memory"
+  ],
+  "license": "MIT",
+  "engines": {
+    "bb": ">=0.44",
+    "bbPluginSdk": ">=0.5.29"
+  },
+  "bb": {
+    "name": "Statusbar \u2014 Host",
+    "description": "This machine's CPU, memory, disk, load, and network in the Statusbar, published from host-monitor's samples.",
+    "branding": {
+      "icon": "Cpu"
+    },
+    "server": "./src/server.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "bb plugin build",
+    "dev": "bb plugin dev"
+  },
+  "dependencies": {
+    "@robcopeland/bb-statusbar-section-protocol": "^0.2.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@get-bb/plugin-sdk": "0.5.29",
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "better-sqlite3": "^12.0.0",
+    "hono": "^4.11.9",
+    "react": "^19.0.0",
+    "typescript": "^5.7.0"
+  },
+  "//devDependencies": "react, hono, and better-sqlite3 are NOT runtime dependencies of this plugin. The SDK's bundled type declarations import them, so they must be resolvable for `tsc --noEmit` to pass in a standalone checkout. BB's bundler resolves server.ts and drops everything else.",
+  "files": [
+    "dist",
+    "src"
+  ]
+}

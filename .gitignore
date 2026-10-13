@@ -1,0 +1,15 @@
+# Dependencies and build output.
+node_modules/
+dist/
+
+# Local environment and secret files. These must never be committed, and the
+# negation at the end keeps an EXAMPLE file tracked so contributors can see the
+# expected shape without ever seeing a real value.
+.env
+.env.*
+!.env.example
+
+# Editor and OS noise.
+.DS_Store
+*.local
+*.log

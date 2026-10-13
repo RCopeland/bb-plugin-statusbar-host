@@ -1,0 +1,208 @@
+name: CI
+
+# Runs on every push and every PR, INCLUDING pushes to main.
+#
+# WHY main IS NOT EXCLUDED (unlike the other bb plugin repos)
+#
+# Those repos exclude main because a merge triggers a publish workflow, and CI
+# on main would be redundant. This repo has no publish workflow and no other
+# gate, so excluding main would mean the default branch is the ONE branch that
+# is never verified.
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least privilege: every job here only reads the repo.
+permissions:
+  contents: read
+
+jobs:
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # Matches the Node version BB 0.44 bundles. node:sqlite needs >= 22.5,
+          # and this plugin depends on it.
+          node-version: "22"
+          cache: npm
+
+      - run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - run: npm ci
+
+      - name: Install the BB CLI
+        run: npm install --global bb-app@0.44.0
+
+      - name: Build the plugin
+        run: bb plugin build
+
+      - name: Assert build artifacts exist
+        run: |
+          set -euo pipefail
+          for f in dist/server.js dist/server.meta.json; do
+            test -s "$f" || { echo "missing or empty: $f"; exit 1; }
+            echo "ok: $f"
+          done
+
+      # A wrong plugin id is a silent misroute: the section would never be
+      # discovered, and nothing would report an error.
+      - name: Assert the manifest declares the expected plugin id
+        run: |
+          set -euo pipefail
+          node -e '
+            const meta = require("./dist/server.meta.json");
+            const want = "statusbar-host";
+            if (meta.pluginId !== want) {
+              console.error(`pluginId is ${meta.pluginId}, expected ${want}`);
+              process.exit(1);
+            }
+            console.log(`ok: pluginId=${meta.pluginId} sdk=${meta.sdkVersion}`);
+          '
+
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Scan the full history, not just the tip: a secret that was committed
+          # and later deleted is still leaked, and still rotatable.
+          fetch-depth: 0
+
+      - name: Scan tracked files for secrets and credential paths
+        run: ./scripts/check-secrets.sh
+
+      - name: Scan the full history for known credential formats
+        run: |
+          set -euo pipefail
+          found=0
+          while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            echo "::error::known credential format in git history: $line"
+            found=1
+          done < <(git log -p --all -S'sk-or-v1-' --oneline \
+            | grep -E '^\+.*sk-or-v1-[0-9a-fA-F]{32,}' || true)
+          if [ "$found" -ne 0 ]; then
+            echo "A credential appears in history. Rotate it." >&2
+            exit 1
+          fi
+          echo "ok: no OpenRouter key format found in history"
+
+  # This plugin reads a THIRD PARTY's private database. That coupling is the
+  # main risk in the codebase, so the properties that make it survivable are
+  # asserted rather than trusted to review.
+  schema-safety:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assert every query names its columns instead of SELECT *
+        run: |
+          set -euo pipefail
+          # A `SELECT *` against a schema we do not own is the failure mode this
+          # guards: host-monitor renames a column, the query still succeeds, and
+          # the bar renders wrong numbers with nothing to indicate it. Naming
+          # columns makes a rename throw, which becomes a visible label.
+          #
+          # Comments are stripped first, because the source explains at length
+          # WHY it avoids `SELECT *` and scanning raw text would match that prose
+          # and fail on the plugin's own documentation. Both `//` lines and
+          # `/** ... */` block bodies must go, since the explanation is a block
+          # comment.
+          #
+          # The strip is deliberately crude (it does not understand `//` inside a
+          # string literal, or a block comment opened and closed on one line).
+          # The failure mode of a missed comment is a false PASS on prose, never
+          # a false FAIL on real code.
+          strip_comments() {
+            sed -e 's://.*::' -e 's:^\s*\*.*::' -e 's:/\*.*\*/::' "$@" \
+              | awk '/\/\*/{inblock=1} !inblock{print} /\*\//{inblock=0}'
+          }
+
+          hits=0
+          for file in src/*.ts; do
+            [ -e "$file" ] || continue
+            while IFS= read -r line; do
+              echo "$file: $line" >&2
+              hits=1
+            done < <(strip_comments "$file" \
+              | grep -nE 'SELECT[[:space:]]+\*' || true)
+          done
+
+          if [ "$hits" -ne 0 ]; then
+            echo "use named columns, not SELECT *" >&2
+            echo "A schema change must fail loudly, not render wrong numbers." >&2
+            exit 1
+          fi
+          echo "ok: no SELECT * in src/"
+
+      - name: Assert the data directory is not hardcoded
+        run: |
+          set -euo pipefail
+          # experimental_dataDir is the SDK's documented way to find bb-managed
+          # files; a dev server uses a different data dir, so a hardcoded ~/.bb
+          # would read production while the dev server reads elsewhere.
+          if ! grep -q 'experimental_dataDir' src/server.ts; then
+            echo "src/server.ts must resolve the data dir via experimental_dataDir" >&2
+            exit 1
+          fi
+          echo "ok: data dir resolved via experimental_dataDir"
+
+      - name: Assert the local host id is resolved before falling back
+        run: |
+          set -euo pipefail
+          # fleet_samples is keyed by host_id, so failing to filter on this
+          # machine's id would show a remote host's CPU as if it were local.
+          if ! grep -q 'readLocalHostId' src/section.ts; then
+            echo "src/section.ts must resolve this machine's host id" >&2
+            exit 1
+          fi
+          echo "ok: local host id is resolved"
+
+  hygiene:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assert no native build step is introduced
+        run: |
+          set -euo pipefail
+          # node:sqlite is a Node built-in on purpose. A native module would add
+          # a build toolchain to every host that installs the plugin.
+          if grep -qE '"better-sqlite3"' package.json && \
+             ! grep -q '"//devDependencies"' package.json; then
+            echo "better-sqlite3 must not be a runtime dependency" >&2
+            exit 1
+          fi
+          echo "ok: no native runtime dependency"
+
+      - name: Assert the plugin ships a server entry point
+        run: |
+          set -euo pipefail
+          node -e '
+            const pkg = require("./package.json");
+            if (!pkg.bb || !pkg.bb.server) {
+              console.error("package.json bb.server is missing");
+              process.exit(1);
+            }
+            console.log(`ok: bb.server=${pkg.bb.server}`);
+          '
